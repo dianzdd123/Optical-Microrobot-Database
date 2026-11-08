@@ -1,72 +1,40 @@
-import os
-import re
-import pandas as pd
+"""PyTorch image wrapper for pose data; see pose_data for splitting rules."""
 from PIL import Image
 from torch.utils.data import Dataset
 import torchvision.transforms as transforms
-from sklearn.model_selection import train_test_split
 
-# Regex for PX_RY
-pose_pattern = re.compile(r"P(\d+)_R(\d+)")
-image_extensions = (".png", ".jpg", ".jpeg")
+# Re-export the loader for the existing experiment scripts.
+from pose_data import load_dataframes
+
 
 class PoseDataset(Dataset):
-    def __init__(self, dataframe, transform=None):
+    """Return image, pitch class and roll class using shared label mappings.
+
+    Mappings default to those attached by load_dataframes, then to this frame's
+    labels. Pass explicit mappings when using independently constructed frames.
+    """
+    def __init__(self, dataframe, transform=None, p_map=None, r_map=None):
         self.df = dataframe.reset_index(drop=True)
-        self.transform = transform or transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor()
-        ])
-        self.P_map = {v: i for i, v in enumerate(sorted(self.df['P'].unique()))}
-        self.R_map = {v: i for i, v in enumerate(sorted(self.df['R'].unique()))}
+        self.transform = transform if transform is not None else transforms.Compose([
+            transforms.Resize((224, 224)), transforms.ToTensor()])
+        if p_map is None:
+            p_map = dataframe.attrs.get('P_map')
+        if r_map is None:
+            r_map = dataframe.attrs.get('R_map')
+        self.P_map = dict(p_map) if p_map is not None else {
+            value: index for index, value in enumerate(sorted(self.df['P'].unique()))}
+        self.R_map = dict(r_map) if r_map is not None else {
+            value: index for index, value in enumerate(sorted(self.df['R'].unique()))}
+        for column, mapping in (('P', self.P_map), ('R', self.R_map)):
+            unknown = set(self.df[column]) - set(mapping)
+            if unknown:
+                raise ValueError(f'Unmapped {column} labels: {sorted(unknown)}')
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        image = Image.open(row['image_path']).convert("RGB")
-        image = self.transform(image)
-        p_label = self.P_map[row['P']]
-        r_label = self.R_map[row['R']]
-        return image, p_label, r_label
+        with Image.open(row['image_path']) as source:
+            image = source.convert('RGB')
+        return self.transform(image), self.P_map[row['P']], self.R_map[row['R']]
 
     def __len__(self):
         return len(self.df)
-
-# Load and split from image folder
-def load_dataframes(root_path="./Image_Pose/robot_1_four_ball"):
-    data = []
-    label_map = {}
-    label_idx = 0
-
-    for folder in os.listdir(root_path):
-        folder_path = os.path.join(root_path, folder)
-        if not os.path.isdir(folder_path):
-            continue
-
-        match = pose_pattern.match(folder)
-        if not match:
-            continue
-
-        p_val, r_val = int(match.group(1)), int(match.group(2))
-        pose_label = f"P{p_val}_R{r_val}"
-
-        if pose_label not in label_map:
-            label_map[pose_label] = label_idx
-            label_idx += 1
-
-        for fname in os.listdir(folder_path):
-            if fname.lower().endswith(image_extensions):
-                image_path = os.path.join(folder_path, fname)
-                data.append({
-                    "image_path": image_path,
-                    "P": p_val,
-                    "R": r_val,
-                    "pose_class": label_map[pose_label]
-                })
-
-    df = pd.DataFrame(data)
-    # train_df, temp_df = train_test_split(df, test_size=0.4, stratify=df['pose_class'], random_state=42)
-    # val_df, test_df = train_test_split(temp_df, test_size=0.5, stratify=temp_df['pose_class'], random_state=42)
-    num_p = df['P'].nunique()
-    num_r = df['R'].nunique()
-    # return train_df, val_df, test_df, num_p, num_r
-    return df, num_p, num_r
